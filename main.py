@@ -1,7 +1,8 @@
 import ee
-import json
 import google.auth
-from flask import Request, jsonify
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
 
 def initialize_ee():
     credentials, project = google.auth.default()
@@ -10,7 +11,6 @@ def initialize_ee():
 def analisis_fitosanitario(temp, humedad, lluvia):
     riesgo_monilia = 0
     alertas_monilia = []
-
     if 22 <= temp <= 28:
         riesgo_monilia += 40
         alertas_monilia.append("🌡️ Temperatura óptima de esporulación")
@@ -23,7 +23,6 @@ def analisis_fitosanitario(temp, humedad, lluvia):
 
     riesgo_mazorca = 0
     alertas_mazorca = []
-
     if temp >= 24 and lluvia > 10:
         riesgo_mazorca += 50
         alertas_mazorca.append("⚠️ Condiciones óptimas para Phytophthora")
@@ -44,31 +43,22 @@ def analisis_fitosanitario(temp, humedad, lluvia):
             'riesgo_score': riesgo_monilia,
             'nivel': nivel(riesgo_monilia),
             'alertas': alertas_monilia,
-            'recomendacion': "Fungicida preventivo + poda sanitaria"
-                             if riesgo_monilia >= 70
-                             else "Monitoreo semanal"
+            'recomendacion': "Fungicida preventivo + poda sanitaria" if riesgo_monilia >= 70 else "Monitoreo semanal"
         },
         'mazorca_negra': {
             'riesgo_score': riesgo_mazorca,
             'nivel': nivel(riesgo_mazorca),
             'alertas': alertas_mazorca,
-            'recomendacion': "Drenaje urgente + cobre sistémico"
-                             if riesgo_mazorca >= 70
-                             else "Revisar drenajes y sombra"
+            'recomendacion': "Drenaje urgente + cobre sistémico" if riesgo_mazorca >= 70 else "Revisar drenajes y sombra"
         }
     }
 
-def analizar(request: Request):
+@app.route('/analizar', methods=['POST', 'OPTIONS'])
+def analizar():
     if request.method == 'OPTIONS':
-        headers = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'POST',
-            'Access-Control-Allow-Headers': 'Content-Type',
-        }
+        headers = {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type'}
         return ('', 204, headers)
-
     headers = {'Access-Control-Allow-Origin': '*'}
-
     try:
         initialize_ee()
         data = request.get_json()
@@ -79,53 +69,22 @@ def analizar(request: Request):
 
         punto = ee.Geometry.Point([lon, lat])
         buffer = punto.buffer(30000)
-
-        lst = (ee.ImageCollection('MODIS/061/MOD11A2')
-               .filterDate('2024-06-01', '2025-04-01')
-               .filterBounds(buffer)
-               .select('LST_Day_1km')
-               .mean()
-               .multiply(0.02).subtract(273.15))
-
-        lst_hist = (ee.ImageCollection('MODIS/061/MOD11A2')
-                    .filterDate('2020-01-01', '2023-12-31')
-                    .select('LST_Day_1km')
-                    .mean()
-                    .multiply(0.02).subtract(273.15))
-
+        lst = (ee.ImageCollection('MODIS/061/MOD11A2').filterDate('2024-06-01', '2025-04-01').filterBounds(buffer).select('LST_Day_1km').mean().multiply(0.02).subtract(273.15))
+        lst_hist = (ee.ImageCollection('MODIS/061/MOD11A2').filterDate('2020-01-01', '2023-12-31').select('LST_Day_1km').mean().multiply(0.02).subtract(273.15))
         anomalia = lst.subtract(lst_hist).clip(buffer)
-
-        stats = anomalia.reduceRegion(
-            reducer=ee.Reducer.percentile([5, 95]),
-            geometry=buffer,
-            scale=1000,
-            maxPixels=1e9
-        ).getInfo()
-
+        stats = anomalia.reduceRegion(reducer=ee.Reducer.percentile([5, 95]), geometry=buffer, scale=1000, maxPixels=1e9).getInfo()
         min_val = stats.get('LST_Day_1km_p5', -2)
         max_val = stats.get('LST_Day_1km_p95', 2)
-
-        temp_zona = lst.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=buffer,
-            scale=1000
-        ).getInfo().get('LST_Day_1km', 25)
-
-        visParams = {
-            'min': min_val, 'max': max_val,
-            'palette': ['313695','4575b4','abd9e9',
-                        'ffffbf','fdae61','f46d43','a50026']
-        }
-
+        temp_zona = lst.reduceRegion(reducer=ee.Reducer.mean(), geometry=buffer, scale=1000).getInfo().get('LST_Day_1km', 25)
+        visParams = {'min': min_val, 'max': max_val, 'palette': ['313695','4575b4','abd9e9','ffffbf','fdae61','f46d43','a50026']}
         tile_url = anomalia.getMapId(visParams)['tile_fetcher'].url_format
-
-        return (jsonify({
-            'tile_url': tile_url,
-            'temperatura_zona': round(temp_zona, 1),
-            'rango_anomalia': {'min': round(min_val,2), 'max': round(max_val,2)},
-            'analisis_fitosanitario': analisis_fitosanitario(temp_zona, humedad, lluvia),
-            'coordenadas': {'lat': lat, 'lon': lon}
-        }), 200, headers)
-
+        return (jsonify({'tile_url': tile_url, 'temperatura_zona': round(temp_zona, 1), 'rango_anomalia': {'min': round(min_val,2), 'max': round(max_val,2)}, 'analisis_fitosanitario': analisis_fitosanitario(temp_zona, humedad, lluvia), 'coordenadas': {'lat': lat, 'lon': lon}}), 200, headers)
     except Exception as e:
         return (jsonify({'error': str(e)}), 500, headers)
+
+@app.route('/')
+def home():
+    return jsonify({'status': 'Shield Agro API activa ✅'})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
